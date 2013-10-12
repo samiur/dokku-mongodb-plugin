@@ -1,0 +1,122 @@
+#!/bin/bash
+set -e;
+
+# Check if name is specified
+if [[ $1 == mongodb:* ]]; then
+    if [[ -z $2 ]]; then
+        APP=""
+    else
+        APP="$2"
+        # Check if app exists with the same name
+        if [[ -d "/home/git/$APP" ]]; then
+            APP_EXISTS=true
+        else
+            APP_EXISTS=false
+        fi
+    fi
+fi
+
+case "$1" in
+
+  mongodb:create)
+    MONGODB_IMAGE=mongodb/$APP
+    # Check if Mongodb container is installed
+    IMAGE=$(docker images | grep "mongodb " |  awk '{print $3}')
+    if [[ -z $IMAGE ]]; then
+        echo "Mongodb image not found... Did you run 'dokku plugins-install' ?"
+        exit 1
+    fi
+    # Stop existing container with the same persistent Mongodb
+    ID=$(docker ps | grep "$MONGODB_IMAGE":latest |  awk '{print $1}')
+    if [[ ! -z "$ID" ]]; then
+        docker stop $ID > /dev/null
+    fi
+    # Fork Mongodb image
+    ID=$(docker run -d mongodb exit 0)
+    docker wait $ID > /dev/null
+    IMAGE=$(docker commit $ID)
+    docker tag $IMAGE $MONGODB_IMAGE
+    # Launch container
+    ID=$(docker run -p 27107 -p 22 -d $MONGODB_IMAGE /usr/bin/mongod --smallfiles)
+    sleep 4
+    # Rename persistent volume
+    if [[ ! -d "/var/lib/docker/volumes/mongodb-$APP" ]]; then
+        VOLUME_PATH=$(docker inspect $ID | grep "/var/lib/docker/volumes/" | awk '{print $2}' | sed -e"s/\/layer//" | sed -e's/"//g')
+        mv $VOLUME_PATH "/var/lib/docker/volumes/mongodb-$APP"
+        sleep 1
+    fi
+    # Link to a potential existing app
+    dokku mongodb:link $APP $APP
+    echo
+    echo "-----> Mongodb container created: $MONGODB_IMAGE"
+    sleep 1
+    dokku mongodb:info $APP
+    ;;
+
+  mongodb:delete)
+    MONGODB_IMAGE=mongodb/$APP
+    # Stop the container
+    ID=$(docker ps -a | grep "$MONGODB_IMAGE":latest |  awk '{print $1}')
+    if [[ ! -z $ID ]]; then
+        docker stop $ID
+    fi
+    # Remove image
+    IMAGE=$(docker images | grep "$MONGODB_IMAGE " |  awk '{print $1}')
+    if [[ ! -z $IMAGE ]]; then
+        docker rmi $IMAGE
+    fi
+    # Remove persistent volume
+    if [[ -d "/var/lib/docker/volumes/mongodb-$APP" ]]; then
+        rm -rf "/var/lib/docker/volumes/mongodb-$APP"
+    fi
+    echo
+    echo "-----> Mongodb container deleted: $MONGODB_IMAGE"
+    ;;
+
+  mongodb:info)
+    MONGODB_IMAGE=mongodb
+    ID=$(docker ps -a | grep "$MONGODB_IMAGE":latest |  awk '{print $1}')
+    IP=$(docker inspect $ID | grep IPAddress | awk '{ print $2 }' | tr -d ',"')
+    PORT=$(docker port $ID 27017)
+    echo
+    echo "       Host: $IP"
+    echo "       Public port: $PORT"
+    echo
+    ;;
+
+  mongodb:link)
+    if $APP_EXISTS; then
+        # Check argument
+        if [[ -z $3 ]]; then
+            echo "You must specify a container name"
+            exit 1
+        fi
+        MONGODB_IMAGE="mongodb"
+        ID=$(docker ps -a | grep "$MONGODB_IMAGE":latest |  awk '{print $1}')
+        IP=$(docker inspect $ID | grep IPAddress | awk '{ print $2 }' | tr -d ',"')
+        # Write MONGODB_IP to app's ENV file
+        URL="MONGODB_IP=$IP"
+        cat "/home/git/$APP/ENV" | grep "$URL" || echo "export $URL" >> "/home/git/$APP/ENV"
+        echo
+        echo "-----> $APP linked to $MONGODB_IMAGE container"
+    fi
+    ;;
+
+  mongodb:logs)
+    MONGODB_IMAGE=redis
+    ID=$(docker ps -a | grep "$MONGODB_IMAGE" |  awk '{print $1}')
+    docker logs $ID | tail -n 100
+    ;;
+
+  help)
+    cat && cat<<EOF
+    mongodb:create <app>     Create a Mongodb container
+    mongodb:delete <app>     Delete specified Mongodb container
+    mongodb:info <app>       Display container informations
+    mongodb:link <app> <rd>  Link an app to a Mongodb container
+    mongodb:logs <app>       Display last logs from Mongodb container
+EOF
+    ;;
+
+esac
+cat
